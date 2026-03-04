@@ -32,9 +32,6 @@ def generate_maze(rows, cols):
 
     carve(0,0)
     return walls
-# ============================================================
-# Camera Class
-# ============================================================
 
 class Camera:
     def __init__(self, x, y, direction, fov_angle, max_range):
@@ -61,7 +58,7 @@ class Camera:
             y_end = self.y + self.max_range * sin(a)
             ray = LineString([(self.x, self.y), (x_end, y_end)])
 
-            closest_pt = (self.x + epsilon*cos(a), self.y + epsilon*sin(a))
+            closest_pt = (x_end, y_end)
             min_dist = self.max_range
 
             for wall_line in wall_lines:
@@ -106,9 +103,6 @@ class Camera:
 
         self.direction = best_dir
 
-# ============================================================
-# Drawing Function
-# ============================================================
 
 def draw_maze(cameras, walls, start, goal, rows, cols):
     fig, ax = plt.subplots(figsize=(8, 8))
@@ -165,3 +159,4 @@ if __name__ == "__main__":
     goal  = (cols - 0.5, rows - 0.5)
 
     draw_maze(cameras, walls, start, goal, rows, cols)
+    
