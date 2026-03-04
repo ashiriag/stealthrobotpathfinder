@@ -4,9 +4,6 @@ from shapely.geometry import LineString, Polygon
 from math import cos, sin, pi
 import random
 
-# ============================================================
-# Maze Generation (Recursive Backtracking)
-# ============================================================
 cell_size = 1
 def generate_maze(rows, cols):
     visited = [[False]*cols for _ in range(rows)]
@@ -47,7 +44,7 @@ class Camera:
         self.fov_angle = fov_angle
         self.max_range = max_range
 
-    def visible_polygon(self, walls, resolution=120):
+    def visible_polygon(self, walls, resolution=360):
         wall_lines = [LineString(w.exterior.coords) for w in walls]
         rays = []
 
@@ -85,10 +82,11 @@ class Camera:
                                 if epsilon < d < min_dist:
                                     closest_pt = (pt.x, pt.y)
                                     min_dist = d
-
+                                    
             rays.append(closest_pt)
 
-        return Polygon([(self.x, self.y)] + rays)
+        return Polygon([(self.x, self.y)] + rays).buffer(0)
+
     def auto_orient(self, walls, min_area=0.5, angle_step=pi/18):
         best_area = 0
         best_dir = self.direction
@@ -145,16 +143,19 @@ def draw_maze(cameras, walls, start, goal, rows, cols):
 
 if __name__ == "__main__":
 
+    random.seed(9)      # <- fix maze
+    np.random.seed(9)
+
     rows = 12
     cols = 10
 
     walls = generate_maze(rows, cols)
 
     cameras = [
-        Camera(1.5, 1.5, direction=pi/4, fov_angle=pi/3, max_range=4),
-        Camera(8.5, 10, direction=-pi/2, fov_angle=pi/4, max_range=4),
-        Camera(5, 6, direction=pi, fov_angle=pi/2, max_range=3)
-    ]
+    Camera(5, 1, direction=pi,        fov_angle=pi/2, max_range=5),
+    Camera(3, 8, direction=pi,     fov_angle=pi/2, max_range=5),
+    Camera(9, 6, direction=pi,       fov_angle=pi/2, max_range=5),
+]
 
     # Auto-rotate cameras if blocked
     for cam in cameras:
