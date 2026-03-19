@@ -28,7 +28,7 @@ from stealth import generate_maze, Camera
 ############################################################
 # PARAMETERS
 ############################################################
-DSTEP = 5.0
+DSTEP = 1.0
 
 # Maximum number of steps (attempts) or nodes (successful steps).
 SMAX = 50000
@@ -390,7 +390,7 @@ def rrt_temporal(startnode, goal_xy, visual=None):
     def sample_state():
         # Goal bias: sample the goal location with a random time phase
         if random.random() < GOAL_BIAS:
-            return Node(goal_xy[0], goal_xy[1], random.choice(TIME_SAMPLES))
+            return Node(goal_xy[0], goal_xy[1], 0.0)
 
         return Node(
             random.uniform(xmin, xmax),
@@ -399,7 +399,7 @@ def rrt_temporal(startnode, goal_xy, visual=None):
         )
 
     def nearest_node(q_rand):
-        return min(tree, key=lambda node: node.stateDistance(q_rand))
+        return min(tree, key=lambda node: node.spatialDistance(q_rand))
 
     def steer_motion(q_near, q_rand):
         """
@@ -416,24 +416,26 @@ def rrt_temporal(startnode, goal_xy, visual=None):
 
         d_step = sqrt((x_new - q_near.x)**2 + (y_new - q_near.y)**2)
         t_new = wrap_time(q_near.t + d_step / ROBOT_SPEED)
-
         return Node(x_new, y_new, t_new)
-
     def steer_wait(q_near, q_rand=None):
-        """
-        Stay in place and advance time.
-        Optionally bias toward the sampled phase if q_rand is provided.
-        """
-        if q_rand is None:
-            dt = WAIT_STEP
-        else:
-            desired = q_near.dt_forward(q_rand)
-            if desired < 1e-6:
-                dt = WAIT_STEP
-            else:
-                dt = min(desired, WAIT_STEP)
-
+        dt = WAIT_STEP
         return Node(q_near.x, q_near.y, wrap_time(q_near.t + dt))
+
+    # def steer_wait(q_near, q_rand=None):
+    #     """
+    #     Stay in place and advance time.
+    #     Optionally bias toward the sampled phase if q_rand is provided.
+    #     """
+    #     if q_rand is None:
+    #         dt = WAIT_STEP
+    #     else:
+    #         desired = q_near.dt_forward(q_rand)
+    #         if desired < 1e-6:
+    #             dt = WAIT_STEP
+    #         else:
+    #             dt = min(desired, WAIT_STEP)
+
+    #     return Node(q_near.x, q_near.y, wrap_time(q_near.t + dt))
 
     def can_connect_to_goal(q_new):
         """
