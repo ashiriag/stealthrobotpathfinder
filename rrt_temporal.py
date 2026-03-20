@@ -12,10 +12,13 @@ This version assumes:
   and is never seen during traversal
 """
 
+import argparse
 import bisect
+import json
 import matplotlib.pyplot as plt
 import numpy as np
 import random
+import time
 from matplotlib.animation import FuncAnimation
 
 from math import inf, sqrt, pi
@@ -55,6 +58,8 @@ TIME_EPS = 0.35           # allowed mismatch between dt and d/v
 WAIT_EPS = 0.20           # if spatial distance <= WAIT_EPS, allow wait edge
 EDGE_CHECK_STEPS = 25     # interpolation samples per edge
 CAMERA_RESOLUTION = 120   # visible polygon resolution
+GOAL_BIAS = 0.08
+MERGE_POS_EPS = 0.25
 
 random.seed(9)
 np.random.seed(9)
@@ -62,6 +67,7 @@ np.random.seed(9)
 # Period of one full camera rotation
 T_PERIOD = 2 * pi / abs(CAMERA_OMEGA)
 TIME_SAMPLES = np.linspace(0.0, T_PERIOD, TIME_LAYERS, endpoint=False)
+WAIT_STEP = T_PERIOD / TIME_LAYERS
 
 
 ############################################################
@@ -83,6 +89,8 @@ for cam in cameras:
 
 (xstart, ystart) = (0.5, 0.5)
 (xgoal,  ygoal)  = (cols - 0.5, rows - 0.5)
+
+camera_polys_by_time = {}
 
 
 ############################################################
@@ -126,6 +134,13 @@ def get_camera_polygons_at_time(t):
     return polys
 
 
+def already_in_tree(tree, node):
+    for other in tree:
+        if other.spatialDistance(node) <= MERGE_POS_EPS:
+            return True
+    return False
+
+
 def interpolate_path(path, frames_per_edge=20):
     """
     Convert a discrete node path into dense animation samples.
@@ -155,19 +170,43 @@ def interpolate_path(path, frames_per_edge=20):
     samples.append((path[-1].x, path[-1].y, path[-1].t))
     return samples
 
+
+def rebuild_time_layers(time_layers=None):
+    global TIME_LAYERS, TIME_SAMPLES, WAIT_STEP, camera_polys_by_time
+
+    if time_layers is not None:
+        TIME_LAYERS = int(time_layers)
+
+    TIME_SAMPLES = np.linspace(0.0, T_PERIOD, TIME_LAYERS, endpoint=False)
+    WAIT_STEP = T_PERIOD / TIME_LAYERS
+
+    camera_polys_by_time = {}
+    for t in TIME_SAMPLES:
+        polys = []
+        for cam in cameras:
+            poly = cam.visible_polygon(walls, resolution=CAMERA_RESOLUTION, t=t)
+            polys.append(prep(poly))
+        camera_polys_by_time[t] = polys
+
+
+def configure_planner(nmax=None, dstep=None, time_layers=None, seed=None):
+    global NMAX, DSTEP
+
+    if nmax is not None:
+        NMAX = int(nmax)
+    if dstep is not None:
+        DSTEP = float(dstep)
+    if seed is not None:
+        random.seed(seed)
+        np.random.seed(seed)
+
+    rebuild_time_layers(time_layers=time_layers)
+
 ############################################################
 # PRECOMPUTED CAMERA POLYGONS
 ############################################################
 
-# map each allowed sampled time to a list of prepared camera polygons
-camera_polys_by_time = {}
-
-for t in TIME_SAMPLES:
-    polys = []
-    for cam in cameras:
-        poly = cam.visible_polygon(walls, resolution=CAMERA_RESOLUTION, t=t)
-        polys.append(prep(poly))
-    camera_polys_by_time[t] = polys
+rebuild_time_layers()
 
 
 ############################################################
@@ -271,6 +310,9 @@ class Node:
         line = LineString([(self.x, self.y), (other.x, other.y)])
         return obstacles.disjoint(line)
 
+    def inSpatialFreespace(self):
+        return obstacles.disjoint(Point(self.x, self.y))
+
 
     ####################################################
     # VALIDITY
@@ -348,12 +390,9 @@ class Node:
 
 
 def rrt(startnode, goalnode, visual=None):
-    # Start the tree with the startnode (set no parent just in case).
     startnode.parent = None
     tree = [startnode]
 
-    # Function to attach a new node to an existing node: attach the
-    # parent, add to the tree, and show in the figure.
     def addtotree(oldnode, newnode):
         newnode.parent = oldnode
         tree.append(newnode)
@@ -361,44 +400,36 @@ def rrt(startnode, goalnode, visual=None):
             visual.drawEdge(oldnode, newnode, color='g', linewidth=1)
             visual.show()
 
-    # Loop - keep growing the tree.
+    def sample_node():
+        if random.random() < GOAL_BIAS:
+            return Node(goalnode.x, goalnode.y, 0.0)
+        return Node(random.uniform(xmin, xmax), random.uniform(ymin, ymax), 0.0)
+
     steps = 0
     while True:
-
-        # Randomly sample nodes
-
-
-        if random.random() < 0.02:
-            q_rand = goalnode
-        else:   
-            q_rand = Node(random.uniform(xmin, xmax), random.uniform(ymin, ymax), 0.0)
-        
-        # Find the nearest node in the tree to the random node
+        q_rand = sample_node()
         q_near = min(tree, key=lambda node: node.distance(q_rand))
 
-        # Then step toward the random node by DSTEP, creating a new node q_new
         distance = q_near.distance(q_rand)
         if distance > 0:
             alpha = min(DSTEP / distance, 1)
             q_new = q_near.intermediate(q_rand, alpha)
 
-            # checks if there can be a line between the two nodes
-            if q_new.inFreespace() and q_near.connectsTo(q_new):
+            if already_in_tree(tree, q_new):
+                steps += 1
+                if (steps >= SMAX) or (len(tree) >= NMAX):
+                    print("Aborted after %d steps and the tree having %d nodes" %
+                            (steps, len(tree)))
+                    return None
+                continue
+
+            if q_new.inSpatialFreespace() and q_near.connectsTo(q_new):
                 addtotree(q_near, q_new)
 
-                # check if q_new connects to the goal
-                if q_new.connectsTo(goalnode):
+                if q_new.distance(goalnode) <= DSTEP and q_new.connectsTo(goalnode):
                     addtotree(q_new, goalnode)
                     break
 
-
-
-        # Check if q_new is in free space and connects to the nearest node
-        # If so, add q_new to the tree and check if it connects to the goal
-        # If it connects to the goal, add the goal to the tree and break the loop
-        
-
-        # Check whether we should abort - too many steps or nodes.
         steps += 1
         if (steps >= SMAX) or (len(tree) >= NMAX):
             print("Aborted after %d steps and the tree having %d nodes" %
@@ -434,56 +465,65 @@ def postProcess(path):
 
 def optimize_stealth(path):
     """
-    Inserts 'Wait' nodes into the path. If a camera blocks the path, 
-    the robot stays at its current (x,y) while time (t) continues to advance.
+    Assign times to a geometric path by searching over discrete wait actions.
+    This keeps the spatial path fixed and uses the temporal logic from the
+    XYT planner only in post-processing.
     """
-    print("Optimizing path for stealth (inserting wait behaviors)...")
-    path[0].t = 0.0
-    new_path = [path[0]]
-    
-    for i in range(len(path) - 1):
-        curr_node = new_path[-1]
-        next_spatial_node = path[i+1]
-        
-        dist = curr_node.distance(next_spatial_node)
-        travel_time = dist / ROBOT_SPEED
-        
-        wait_time = 0.0
-        step_size = 0.2  # Time increments to check for a safe opening
-        max_wait = T_PERIOD
-        
-        found_window = False
-        while wait_time < max_wait:
-            # Calculate arrival time if we start moving after waiting 'wait_time'
-            arrival_time = wrap_time(curr_node.t + wait_time + travel_time)
-            temp_next = Node(next_spatial_node.x, next_spatial_node.y, arrival_time)
-            
-            # Check if the path is safe starting at (curr.t + wait_time)
-            original_t = curr_node.t
-            curr_node.t = wrap_time(original_t + wait_time)
-            
-            if curr_node.edgeIsSafe(temp_next):
-                # If we waited, insert a node representing the end of the wait
-                if wait_time > 0:
-                    wait_node = Node(curr_node.x, curr_node.y, curr_node.t)
-                    new_path.append(wait_node)
-                
-                # Add the movement to the next location
-                new_path.append(temp_next)
-                found_window = True
-                curr_node.t = original_t # Reset for consistency
-                break
-            
-            curr_node.t = original_t
-            wait_time += step_size
-            
-        if not found_window:
-            print(f"Warning: No safe window found for segment {i}. Moving anyway.")
-            arrival_time = wrap_time(curr_node.t + travel_time)
-            next_spatial_node.t = arrival_time
-            new_path.append(next_spatial_node)
+    print("Optimizing path for stealth (searching over wait layers)...")
+    if not path:
+        return None
 
-    return new_path
+    start = Node(path[0].x, path[0].y, 0.0)
+    if not start.inFreespace():
+        print("Start node is visible at t = 0.0, so no valid timed path exists.")
+        return None
+
+    states = {0.0: (0.0, [start])}
+
+    for i in range(len(path) - 1):
+        next_states = {}
+
+        for _, (elapsed, timed_prefix) in states.items():
+            curr_node = timed_prefix[-1]
+            next_spatial = path[i + 1]
+            travel_time = curr_node.spatialDistance(next_spatial) / ROBOT_SPEED
+
+            for wait_steps in range(TIME_LAYERS):
+                wait_time = wait_steps * WAIT_STEP
+                depart_t = wrap_time(curr_node.t + wait_time)
+                depart_node = Node(curr_node.x, curr_node.y, depart_t)
+
+                if wait_steps > 0 and not curr_node.edgeIsSafe(depart_node):
+                    continue
+
+                arrival_t = wrap_time(depart_t + travel_time)
+                arrival_node = Node(next_spatial.x, next_spatial.y, arrival_t)
+
+                if not arrival_node.inFreespace():
+                    continue
+
+                if not depart_node.edgeIsSafe(arrival_node):
+                    continue
+
+                candidate_path = list(timed_prefix)
+                if wait_steps > 0:
+                    candidate_path.append(depart_node)
+                candidate_path.append(arrival_node)
+
+                candidate_cost = elapsed + wait_time + travel_time
+                key = round(arrival_t, 6)
+                best = next_states.get(key)
+                if best is None or candidate_cost < best[0]:
+                    next_states[key] = (candidate_cost, candidate_path)
+
+        if not next_states:
+            print(f"No safe temporal schedule found for segment {i}.")
+            return None
+
+        states = next_states
+
+    _, best_path = min(states.values(), key=lambda item: item[0])
+    return best_path
 ############################################################
 # ANIMATION
 ############################################################
@@ -628,121 +668,130 @@ def animate_path(path, frames_per_edge=20, interval=80, save=False, filename="st
 # MAIN
 ############################################################
 
-def main():
+def run_planner(show_visual=True, animate=False):
+    result = {
+        "success_spatial": False,
+        "success_temporal": False,
+        "spatial_cost": None,
+        "temporal_cost": None,
+        "spatial_nodes": 0,
+        "temporal_nodes": 0,
+        "timed_path_duration": None,
+        "path": None,
+        "finalpath": None,
+    }
+
     print("Running 3D temporal PRM")
-    # print("N =", N, "K =", K)
     print("Robot speed =", ROBOT_SPEED)
     print("Camera omega =", CAMERA_OMEGA)
     print("Time period =", T_PERIOD)
-
-    visual = Visualization(show_camera_time=0.0)
-
     print('Running with step size ', DSTEP, ' and up to ', NMAX, ' nodes.')
 
-    # Create the figure.  Some computers seem to need an additional show()?
-    visual = Visualization()
-    visual.show()
+    visual = None
+    if show_visual:
+        visual = Visualization()
+        visual.show()
 
-    # Create the start/goal nodes.
     startnode = Node(xstart, ystart, 0.0)
     goalnode  = Node(xgoal,  ygoal, 0.0)
 
-    # Show the start/goal nodes.
-    visual.drawNode(startnode, color='orange', marker='o')
-    visual.drawNode(goalnode,  color='purple', marker='o')
-    visual.show("Showing basic world")
+    if visual:
+        visual.drawNode(startnode, color='orange', marker='o')
+        visual.drawNode(goalnode,  color='purple', marker='o')
+        visual.show("Showing basic world")
 
-
-    # Run the RRT planner.
     print("Running RRT...")
     path = rrt(startnode, goalnode, visual)
+    result["path"] = path
 
-    # If unable to connect, just note before closing.
     if not path:
-        visual.show("UNABLE TO FIND A PATH")
-        return
+        if visual:
+            visual.show("UNABLE TO FIND A PATH")
+        return result
 
-    # Show the path.
-    cost = pathCost(path)
-    visual.drawPath(path, color='r', linewidth=2)
-    visual.show("Showing the raw path (cost/length %.1f)" % cost)
+    result["success_spatial"] = True
+    result["spatial_cost"] = pathCost(path)
+    result["spatial_nodes"] = len(path)
 
+    if visual:
+        visual.drawPath(path, color='r', linewidth=2)
+        visual.show("Showing the raw path (cost/length %.1f)" % result["spatial_cost"])
 
-    # Post process the path.
     finalpath = postProcess(path)
 
-    # Show the post-processed path.
-    cost = pathCost(finalpath)
     finalpath = optimize_stealth(finalpath)
-    visual.drawPath(finalpath, color='b', linewidth=2)
-    visual.show("Showing the post-processed path (cost/length %.1f)" % cost)
+    result["finalpath"] = finalpath
+    if not finalpath:
+        if visual:
+            visual.show("UNABLE TO FIND A SAFE TEMPORAL SCHEDULE")
+        return result
 
-    # Set the starting time
-    # finalpath[0].t = 0.0
-    
-    # Iterate through the path to update time stamps based on ROBOT_SPEED
-    # for i in range(len(finalpath) - 1):
-    #     current_node = finalpath[i]
-    #     next_node = finalpath[i+1]
-        
-    #     # Calculate time taken to travel the distance
-    #     travel_time = current_node.distance(next_node) / ROBOT_SPEED
-        
-    #     # Set the next node's time (wrapped to the camera period)
-    #     next_node.t = wrap_time(current_node.t + travel_time)
+    result["success_temporal"] = True
+    result["temporal_cost"] = pathCost(finalpath)
+    result["temporal_nodes"] = len(finalpath)
+    result["timed_path_duration"] = sum(
+        finalpath[i - 1].dt_forward(finalpath[i]) for i in range(1, len(finalpath))
+    )
 
+    if visual:
+        visual.drawPath(finalpath, color='b', linewidth=2)
+        visual.show("Showing the post-processed path (cost/length %.1f)" % result["temporal_cost"])
 
+    if animate:
+        animate_path(finalpath, frames_per_edge=25, interval=80)
 
-    # startnode = Node(xstart, ystart, 0.0)
-
-    # goalnodes = addGoalNodes(nodes, num_goal_times=TIME_LAYERS)
-
-    # if not goalnodes:
-    #     print("No valid goal-time nodes found")
-    #     return
-
-    # for g in goalnodes:
-    #     visual.drawNode(g, color='purple', marker='o', markersize=4)
-
-    # if not startnode.inFreespace():
-    #     print("Start node is invalid at t = 0")
-    #     return
-
-    # visual.drawNode(startnode, color='orange', marker='o', markersize=8)
-    # visual.show("World ready")
-
-    # print("Sampling 3D nodes...")
-    # nodes = createNodes(N)
-
-    # for node in nodes:
-        # visual.drawNode(node, color='k', marker='x', markersize=3)
-
-    # nodes.append(startnode)
-
-    # goalnodes = addGoalNodes(nodes, num_goal_times=TIME_LAYERS)
-
-    # if not goalnodes:
-    #     print("No valid goal-time nodes found")
-    #     return
-
-    # for g in goalnodes:
-    #     visual.drawNode(g, color='purple', marker='o', markersize=4)
-
-    # visual.show("Nodes sampled")
-
-    # print("Connecting neighbors...")
-    # connectNearestNeighbors(nodes, K)
+    return result
 
 
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--nmax", type=int, default=NMAX)
+    parser.add_argument("--dstep", type=float, default=DSTEP)
+    parser.add_argument("--time-layers", type=int, default=TIME_LAYERS)
+    parser.add_argument("--seed", type=int, default=9)
+    parser.add_argument("--no-viz", action="store_true")
+    parser.add_argument("--animate", action="store_true")
+    parser.add_argument("--no-animate", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    return parser.parse_args()
 
-    # edge_count = 0
-    # for i, node in enumerate(nodes):
-    #     for neighbor in node.neighbors:
-    #         edge_count += 1
-    #         visual.drawEdge(node, neighbor, color='green', linewidth=0.2)
 
-    # print("Directed edges:", edge_count)
-    # visual.show("Graph built")
+def main():
+    args = parse_args()
+    configure_planner(
+        nmax=args.nmax,
+        dstep=args.dstep,
+        time_layers=args.time_layers,
+        seed=args.seed,
+    )
+
+    animate = args.animate or not args.no_viz
+    if args.no_animate:
+        animate = False
+
+    t0 = time.time()
+    result = run_planner(show_visual=not args.no_viz, animate=animate)
+    runtime = time.time() - t0
+
+    summary = {
+        "nmax": NMAX,
+        "dstep": DSTEP,
+        "time_layers": TIME_LAYERS,
+        "seed": args.seed,
+        "success_spatial": result["success_spatial"],
+        "success_temporal": result["success_temporal"],
+        "spatial_cost": result["spatial_cost"],
+        "temporal_cost": result["temporal_cost"],
+        "spatial_nodes": result["spatial_nodes"],
+        "temporal_nodes": result["temporal_nodes"],
+        "timed_path_duration": result["timed_path_duration"],
+        "runtime_sec": runtime,
+    }
+
+    if args.json:
+        print(json.dumps(summary))
+    else:
+        print(summary)
 
     # print("Running A*...")
     # path = astar(nodes, startnode, goalnodes)
@@ -760,8 +809,6 @@ def main():
 
     # visual.drawPath(path, color='blue', linewidth=3)
     # visual.show("Temporal stealth path found")
-
-    animate_path(finalpath, frames_per_edge=25, interval=80)
 
 
 if __name__ == "__main__":
