@@ -368,7 +368,7 @@ def rrt(startnode, goalnode, visual=None):
         # Randomly sample nodes
 
 
-        if random.random() < 0.05:
+        if random.random() < 0.02:
             q_rand = goalnode
         else:   
             q_rand = Node(random.uniform(xmin, xmax), random.uniform(ymin, ymax), 0.0)
@@ -434,12 +434,10 @@ def postProcess(path):
 
 def optimize_stealth(path):
     """
-    Post-processes the path to insert explicit 'Wait' nodes.
-    If a segment is unsafe, the robot stays at the current (x,y)
-    until the cameras have rotated to a safe configuration.
+    Inserts 'Wait' nodes into the path. If a camera blocks the path, 
+    the robot stays at its current (x,y) while time (t) continues to advance.
     """
     print("Optimizing path for stealth (inserting wait behaviors)...")
-    # Initialize with the start node at t=0
     path[0].t = 0.0
     new_path = [path[0]]
     
@@ -447,39 +445,35 @@ def optimize_stealth(path):
         curr_node = new_path[-1]
         next_spatial_node = path[i+1]
         
-        dist = curr_node.spatialDistance(next_spatial_node)
+        dist = curr_node.distance(next_spatial_node)
         travel_time = dist / ROBOT_SPEED
         
         wait_time = 0.0
-        step_size = 0.2  # Check every 0.2 seconds for an opening
+        step_size = 0.2  # Time increments to check for a safe opening
         max_wait = T_PERIOD
         
         found_window = False
         while wait_time < max_wait:
-            # We simulate a "Wait" at current position followed by "Motion" to next position
+            # Calculate arrival time if we start moving after waiting 'wait_time'
             arrival_time = wrap_time(curr_node.t + wait_time + travel_time)
             temp_next = Node(next_spatial_node.x, next_spatial_node.y, arrival_time)
             
-            # Check if the motion edge from (curr.x, curr.y, curr.t + wait) 
-            # to (next.x, next.y, arrival_t) is safe.
-            # We temporarily update curr_node.t to check safety for the motion part
+            # Check if the path is safe starting at (curr.t + wait_time)
             original_t = curr_node.t
             curr_node.t = wrap_time(original_t + wait_time)
             
             if curr_node.edgeIsSafe(temp_next):
-                # If we had to wait, add a node representing the end of the wait
+                # If we waited, insert a node representing the end of the wait
                 if wait_time > 0:
                     wait_node = Node(curr_node.x, curr_node.y, curr_node.t)
-                    wait_node.parent = new_path[-1]
                     new_path.append(wait_node)
                 
-                # Add the actual movement node
-                temp_next.parent = new_path[-1]
+                # Add the movement to the next location
                 new_path.append(temp_next)
                 found_window = True
+                curr_node.t = original_t # Reset for consistency
                 break
             
-            # Reset t and try waiting longer
             curr_node.t = original_t
             wait_time += step_size
             
@@ -487,11 +481,9 @@ def optimize_stealth(path):
             print(f"Warning: No safe window found for segment {i}. Moving anyway.")
             arrival_time = wrap_time(curr_node.t + travel_time)
             next_spatial_node.t = arrival_time
-            next_spatial_node.parent = curr_node
             new_path.append(next_spatial_node)
 
     return new_path
-
 ############################################################
 # ANIMATION
 ############################################################
@@ -590,6 +582,7 @@ def animate_path(path, frames_per_edge=20, interval=80, save=False, filename="st
         trail_plot.set_data(xs_trail, ys_trail)
 
         # update camera FOV polygons
+
         polys = get_camera_polygons_at_time(t)
         robot_seen = False
 
