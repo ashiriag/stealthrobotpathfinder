@@ -43,7 +43,7 @@ cols = 10
 
 ROBOT_SPEED = 1.0         # units / second
 CAMERA_OMEGA = pi / 6     # rad / second
-TIME_LAYERS = 40          # discrete time layers for camera polygon precomputation
+TIME_LAYERS = 400          # discrete time layers for camera polygon precomputation
 WAIT_EPS = 0.20           # spatial threshold for wait edges
 EDGE_CHECK_STEPS = 25     # interpolation samples per edge check
 CAMERA_RESOLUTION = 120   # visible polygon resolution
@@ -94,14 +94,30 @@ def nearest_time_sample(t):
     return TIME_SAMPLES[idx]
 
 
+# def point_seen_at_time(x, y, t):
+#     t_snap = nearest_time_sample(t)
+#     p = Point(x, y)
+#     for poly in camera_polys_by_time[t_snap]:
+#         if poly.contains(p):
+#             return True
+#     return False
 def point_seen_at_time(x, y, t):
-    t_snap = nearest_time_sample(t)
+    t_wrapped = wrap_time(t)
     p = Point(x, y)
-    for poly in camera_polys_by_time[t_snap]:
-        if poly.contains(p):
-            return True
+    
+    # Find the two bracketing time samples
+    idx = int(np.argmin(np.abs(TIME_SAMPLES - t_wrapped)))
+    indices_to_check = set()
+    indices_to_check.add(idx)
+    indices_to_check.add((idx - 1) % TIME_LAYERS)
+    indices_to_check.add((idx + 1) % TIME_LAYERS)
+    
+    for i in indices_to_check:
+        t_snap = TIME_SAMPLES[i]
+        for poly in camera_polys_by_time[t_snap]:
+            if poly.contains(p):
+                return True
     return False
-
 
 def get_camera_polygons_at_time(t):
     polys = []
@@ -123,8 +139,13 @@ def already_in_tree(tree, node):
             return True
     return False
 
+# before: gives every edge the same number of frames regardless of time duration
+# fast edges look choppy, slow edges look smooth but take a long time to animate
+# every edge takes the same number of frames regardless of how long it takes in real time
+# wait edge of 3 sec takes same number of frames as motion edge of 0.5 sec 
 
-def interpolate_path(path, frames_per_edge=20):
+# make frames prop to time duration 
+def interpolate_path(path, seconds_per_frame=0.05):
     samples = []
     if not path:
         return samples
@@ -132,8 +153,9 @@ def interpolate_path(path, frames_per_edge=20):
         a = path[i]
         b = path[i + 1]
         dt = a.dt_forward(b)
-        for k in range(frames_per_edge):
-            s = k / frames_per_edge
+        n_frames = max(1, int(dt / seconds_per_frame))
+        for k in range(n_frames):
+            s = k / n_frames
             x = a.x + s * (b.x - a.x)
             y = a.y + s * (b.y - a.y)
             t = wrap_time(a.t + s * dt)
@@ -518,12 +540,12 @@ def pathCost(path):
 # ANIMATION
 ############################################################
 
-def animate_path(path, frames_per_edge=20, interval=80, save=False, filename="stealth_animation.gif"):
+def animate_path(path, seconds_per_frame=0.05, interval=80, save=False, filename="stealth_animation.gif"):
     if not path:
         print("No path to animate.")
         return
 
-    samples = interpolate_path(path, frames_per_edge=frames_per_edge)
+    samples = interpolate_path(path, seconds_per_frame=0.05)
 
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.set_xlim(0, cols)
@@ -640,7 +662,7 @@ def main():
     visual.show("Path found (spatial length %.1f, elapsed time %.1f s)" %
                 (cost, path[-1].creach))
 
-    animate_path(path, frames_per_edge=25, interval=80)
+    animate_path(path, seconds_per_frame=0.05, interval=80)
 
 
 if __name__ == "__main__":
